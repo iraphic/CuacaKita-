@@ -134,10 +134,10 @@ export default function App() {
     setLoadTitle('Mendeteksi lokasi...');
     setLoadStep('Meminta izin GPS...');
     setIsRefreshing(true);
-    const origin = window.location.origin;
+    
     try {
       // Check database status
-      const dbStatus = await fetch(`${origin}/api/db-status`).then(r => r.json()).catch((e) => {
+      const dbStatus = await fetch(`/api/db-status`).then(r => r.json()).catch((e) => {
         console.warn("DB Status check failed:", e);
         return { count: 0 };
       });
@@ -153,8 +153,12 @@ export default function App() {
       try {
         const pos = await new Promise<GeolocationPosition>((ok, fail) => {
           if (!navigator.geolocation) return fail(new Error('GPS tidak didukung'));
-          // Safari fix: No options at all is often more stable
-          navigator.geolocation.getCurrentPosition(ok, fail, { timeout: 15000 });
+          // Safari fix: Simple options
+          navigator.geolocation.getCurrentPosition(ok, fail, { 
+            enableHighAccuracy: false,
+            timeout: 10000,
+            maximumAge: 0
+          });
         });
         lat = pos.coords.latitude;
         lon = pos.coords.longitude;
@@ -163,7 +167,7 @@ export default function App() {
         setLoadStep('GPS gagal, mencoba deteksi IP...');
         
         // Try IP-based detection from backend
-        const ipRes = await fetch(`${origin}/api/weather/ip`);
+        const ipRes = await fetch(`/api/weather/ip`);
         if (ipRes.ok) {
           const ipData = await ipRes.json();
           handleWeatherData(ipData.weather, `${ipData.region.village || ipData.region.district}, ${ipData.region.city}`);
@@ -179,7 +183,7 @@ export default function App() {
         setLoadStep(`${lat.toFixed(4)}, ${lon.toFixed(4)}`);
         
         // Use backend forecast endpoint (more robust)
-        const r = await fetch(`${origin}/api/weather/forecast?lat=${lat}&long=${lon}`);
+        const r = await fetch(`/api/weather/forecast?lat=${lat}&long=${lon}`);
         if (!r.ok) {
           const errData = await r.json();
           throw new Error(errData.error || 'Gagal mengambil data cuaca');
@@ -247,12 +251,12 @@ export default function App() {
     setSearchResults([]);
     try {
       // 1. Search Nominatim for general places
-      const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(searchQuery + ', Indonesia')}&format=json&addressdetails=1&limit=5&accept-language=id`,
-        { headers: { 'User-Agent': 'CuacaBMKGApp/2.0' } });
+      // Note: User-Agent is a forbidden header in browsers, removed it to avoid Safari errors
+      const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(searchQuery + ', Indonesia')}&format=json&addressdetails=1&limit=5&accept-language=id`);
       const nomRes = await r.json();
       
       // 2. Search our backend for specific BMKG regions
-      const br = await fetch(`${window.location.origin}/api/search-region?q=${encodeURIComponent(searchQuery)}`);
+      const br = await fetch(`/api/search-region?q=${encodeURIComponent(searchQuery)}`);
       const backRes = await br.json();
       
       // Combine results, marking backend ones
@@ -281,7 +285,7 @@ export default function App() {
         if (!wd) throw new Error('Data cuaca tidak tersedia untuk wilayah ini');
         handleWeatherData(wd, place.name);
       } else {
-        const r = await fetch(`${window.location.origin}/api/weather/forecast?lat=${place.lat}&long=${place.lon}`);
+        const r = await fetch(`/api/weather/forecast?lat=${place.lat}&long=${place.lon}`);
         if (!r.ok) {
           const errData = await r.json();
           throw new Error(errData.error || 'Gagal mengambil data cuaca');
