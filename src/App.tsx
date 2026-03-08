@@ -125,97 +125,6 @@ export default function App() {
     } catch { return null; }
   };
 
-  const nomDetails = async (placeId: number) => {
-    try {
-      const r = await fetch(`https://nominatim.openstreetmap.org/details?place_id=${placeId}&format=json&addressdetails=0&accept-language=id`,
-        { headers: { 'User-Agent': 'CuacaBMKGApp/2.0' } });
-      if (!r.ok) return {};
-      const d = await r.json();
-      return d.extratags || {};
-    } catch { return {}; }
-  };
-
-  const overpassRef = async (lat: number, lon: number) => {
-    setLoadStep('Mencari batas wilayah administratif...');
-    const q = `[out:json][timeout:10];(relation["boundary"="administrative"]["admin_level"~"^[78]$"]["ref:kemendagri"](around:8000,${lat},${lon}););out tags 5;`;
-    const r = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(q) });
-    if (!r.ok) return [];
-    const d = await r.json();
-    return (d.elements || []).sort((a: any, b: any) => (b.tags?.admin_level || 0) - (a.tags?.admin_level || 0));
-  };
-
-  const resolveADM4 = async (nom: any): Promise<{ adm4: string, displayName: string, weatherData: WeatherData }> => {
-    setLoadTitle('Mencari kode wilayah BMKG...');
-    const addr = nom.address || {};
-    const village = addr.village || addr.suburb || addr.hamlet || addr.neighbourhood || '';
-    const district = addr.district || addr.city_district || '';
-    const city = addr.city || addr.town || addr.county || addr.state_district || '';
-    const state = addr.state || addr.region || '';
-    const locDisp = [district || village, city].filter(Boolean).join(', ') || nom.display_name?.split(',').slice(0, 2).join(',') || 'Lokasi Anda';
-    
-    setLoadStep(`📍 ${locDisp}`);
-
-    try {
-      // Call our new backend API for reliable resolution
-      const params = new URLSearchParams({
-        village: village,
-        district: district,
-        city: city,
-        province: state
-      });
-      
-      setLoadStep(`Mencari di database wilayah...`);
-      const res = await fetch(`/api/resolve-region?${params.toString()}`);
-      if (res.ok) {
-        const region = await res.json();
-        setLoadStep(`Ditemukan: ${region.name} (${region.code})`);
-        const wd = await probeBMKG(region.code);
-        if (wd) return { adm4: region.code, displayName: region.name, weatherData: wd };
-        else setLoadStep(`Data BMKG tidak tersedia untuk ${region.code}`);
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        console.warn("Backend resolution failed:", errData.error);
-        setLoadStep(`Wilayah tidak ditemukan di database lokal.`);
-      }
-    } catch (e) {
-      console.warn("Backend resolution error:", e);
-    }
-
-    // Fallback to OSM/Overpass if backend fails or doesn't find it
-    if (nom.place_id) {
-      setLoadStep('Memeriksa data wilayah OSM...');
-      const tags = await nomDetails(nom.place_id);
-      const ref = tags['ref:kemendagri'] || '';
-      if (ref.match(/^\d+\.\d+\.\d+\.\d+$/)) {
-        const wd = await probeBMKG(ref);
-        if (wd) return { adm4: ref, displayName: locDisp, weatherData: wd };
-      }
-    }
-
-    const lat = nom.lat, lon = nom.lon;
-    const els = await overpassRef(lat, lon);
-    
-    for (const el of els) {
-      const ref = el.tags?.['ref:kemendagri'] || '';
-      if (!ref) continue;
-      if (ref.match(/^\d+\.\d+\.\d+\.\d+$/)) {
-        setLoadStep(`Mencoba kode wilayah: ${ref}`);
-        const wd = await probeBMKG(ref);
-        if (wd) return { adm4: ref, displayName: locDisp, weatherData: wd };
-      }
-      if (ref.match(/^\d+\.\d+\.\d+$/)) {
-        setLoadStep(`Mencoba kecamatan ${el.tags?.name || ''} (${ref})...`);
-        for (const sfx of ['1001', '2001', '3001', '1002', '2002', '1003', '0001', '0002', '1004', '2004']) {
-          const probe = `${ref}.${sfx}`;
-          const wd = await probeBMKG(probe);
-          if (wd) return { adm4: probe, displayName: locDisp, weatherData: wd };
-        }
-      }
-    }
-
-    throw new Error(`Kode wilayah BMKG tidak ditemukan untuk lokasi ini.\n\nSilakan gunakan fitur pencarian manual di bawah untuk memilih lokasi terdekat.`);
-  };
-
   const startApp = useCallback(async () => {
     setScreen('loading');
     setLoadTitle('Mendeteksi lokasi...');
@@ -226,25 +135,49 @@ export default function App() {
       const dbStatus = await fetch('/api/db-status').then(r => r.json()).catch(() => ({ count: 0 }));
       if (dbStatus.count === 0) {
         setLoadStep('Menunggu database wilayah siap...');
-        // Give it a moment to seed if it's the first run
         await new Promise(r => setTimeout(r, 3000));
       }
 
-      const pos = await new Promise<GeolocationPosition>((ok, fail) => {
-        if (!navigator.geolocation) return fail(new Error('GPS tidak didukung'));
-        navigator.geolocation.getCurrentPosition(ok, fail, { timeout: 15000, enableHighAccuracy: false, maximumAge: 90000 });
-      });
-      const { latitude: lat, longitude: lon } = pos.coords;
-      
-      setLoadTitle('Menentukan wilayah...');
-      setLoadStep(`${lat.toFixed(4)}, ${lon.toFixed(4)}`);
-      const r = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&addressdetails=1&accept-language=id&zoom=14`,
-        { headers: { 'User-Agent': 'CuacaBMKGApp/2.0' } });
-      if (!r.ok) throw new Error('Reverse geocode gagal');
-      const nom = await r.json();
-      
-      const res = await resolveADM4(nom);
-      handleWeatherData(res.weatherData, res.displayName);
+      // Try GPS first
+      let lat: number | null = null;
+      let lon: number | null = null;
+
+      try {
+        const pos = await new Promise<GeolocationPosition>((ok, fail) => {
+          if (!navigator.geolocation) return fail(new Error('GPS tidak didukung'));
+          navigator.geolocation.getCurrentPosition(ok, fail, { timeout: 8000, enableHighAccuracy: false, maximumAge: 90000 });
+        });
+        lat = pos.coords.latitude;
+        lon = pos.coords.longitude;
+      } catch (gpsErr: any) {
+        console.warn('GPS failed, trying IP fallback...', gpsErr);
+        setLoadStep('GPS gagal, mencoba deteksi IP...');
+        
+        // Try IP-based detection from backend
+        const ipRes = await fetch('/api/weather/ip');
+        if (ipRes.ok) {
+          const ipData = await ipRes.json();
+          handleWeatherData(ipData.weather, `${ipData.region.village || ipData.region.district}, ${ipData.region.city}`);
+          return; // Success via IP
+        }
+        
+        // If IP also fails, throw the original GPS error to show in UI
+        throw gpsErr;
+      }
+
+      if (lat && lon) {
+        setLoadTitle('Menentukan wilayah...');
+        setLoadStep(`${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+        
+        // Use backend forecast endpoint (more robust)
+        const r = await fetch(`/api/weather/forecast?lat=${lat}&long=${lon}`);
+        if (!r.ok) {
+          const errData = await r.json();
+          throw new Error(errData.error || 'Gagal mengambil data cuaca');
+        }
+        const data = await r.json();
+        handleWeatherData(data.weather, `${data.region.village || data.region.district}, ${data.region.city}`);
+      }
     } catch (err: any) {
       console.error(err);
       let msg = err.message || 'Terjadi kesalahan.';
@@ -328,20 +261,20 @@ export default function App() {
     setLoadTitle('Mengambil data cuaca...');
     setLoadStep(place.display_name || place.name);
     setIsRefreshing(true);
+    setIsSearchOpen(false);
     try {
       if (place.isBackend) {
-        // Direct selection from our database
         const wd = await probeBMKG(place.code);
         if (!wd) throw new Error('Data cuaca tidak tersedia untuk wilayah ini');
         handleWeatherData(wd, place.name);
       } else {
-        // Selection from Nominatim
-        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${place.lat}&lon=${place.lon}&format=json&addressdetails=1&accept-language=id&zoom=14`,
-          { headers: { 'User-Agent': 'CuacaBMKGApp/2.0' } });
-        if (!r.ok) throw new Error('Reverse geocode gagal');
-        const nom = await r.json();
-        const res = await resolveADM4(nom);
-        handleWeatherData(res.weatherData, place.display_name.split(',')[0]);
+        const r = await fetch(`/api/weather/forecast?lat=${place.lat}&long=${place.lon}`);
+        if (!r.ok) {
+          const errData = await r.json();
+          throw new Error(errData.error || 'Gagal mengambil data cuaca');
+        }
+        const data = await r.json();
+        handleWeatherData(data.weather, `${data.region.village || data.region.district}, ${data.region.city}`);
       }
     } catch (e: any) {
       setErrorMsg(e.message);

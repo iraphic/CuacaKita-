@@ -192,6 +192,58 @@ app.get("/api/weather", async (req, res) => {
   }
 });
 
+app.get("/api/weather/ip", async (req, res) => {
+  const lat = req.headers['x-vercel-ip-latitude'] || req.headers['x-forwarded-for-lat'];
+  const lon = req.headers['x-vercel-ip-longitude'] || req.headers['x-forwarded-for-lon'];
+
+  if (!lat || !lon) {
+    return res.status(404).json({ error: "Location headers not found. This feature requires Vercel deployment." });
+  }
+
+  try {
+    // Reuse the forecast logic
+    const revRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`, {
+      headers: { 'User-Agent': 'BMKG-Weather-App/1.0' }
+    });
+    
+    if (!revRes.ok) throw new Error("Failed to reverse geocode IP location");
+    const revData = await revRes.json();
+    const addr = revData.address || {};
+    
+    const village = addr.village || addr.suburb || addr.neighbourhood || addr.hamlet;
+    const district = addr.city_district || addr.district || addr.suburb;
+    const city = addr.city || addr.town || addr.municipality || addr.county;
+    const state = addr.state;
+
+    const region = resolveRegion(village, district, city, state);
+    if (!region) {
+      return res.status(404).json({ error: "IP location region not found in BMKG database", address: addr });
+    }
+
+    const adm4 = region.code;
+    const cleanCode = adm4.replace(/\./g, '');
+    
+    let weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${adm4}`);
+    if (!weatherRes.ok) {
+      weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${cleanCode}`);
+    }
+
+    if (!weatherRes.ok) {
+      return res.status(404).json({ error: "Weather data not found for IP region", region });
+    }
+
+    const weatherData = await weatherRes.json();
+    res.json({
+      region,
+      address: addr,
+      weather: weatherData,
+      source: 'vercel-ip-headers'
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get("/api/weather/forecast", async (req, res) => {
   const { lat, long, lon } = req.query;
   const latitude = lat;
