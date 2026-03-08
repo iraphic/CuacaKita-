@@ -105,24 +105,28 @@ export default function App() {
   };
 
   const probeBMKG = async (adm4: string) => {
+    if (!adm4 || typeof adm4 !== 'string') return null;
     const cleanCode = adm4.replace(/\./g, '');
     try {
       // Try with dots first
-      let r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${adm4}`);
+      let r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(adm4)}`);
       if (r.ok) {
         const d = await r.json();
         if (d && d.data && d.data.length > 0 && d.data[0].cuaca && d.data[0].cuaca.length > 0) return d;
       }
       
       // Try without dots
-      r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${cleanCode}`);
+      r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(cleanCode)}`);
       if (r.ok) {
         const d = await r.json();
         if (d && d.data && d.data.length > 0 && d.data[0].cuaca && d.data[0].cuaca.length > 0) return d;
       }
       
       return null;
-    } catch { return null; }
+    } catch (e) { 
+      console.error("Probe BMKG error:", e);
+      return null; 
+    }
   };
 
   const startApp = useCallback(async () => {
@@ -145,7 +149,11 @@ export default function App() {
       try {
         const pos = await new Promise<GeolocationPosition>((ok, fail) => {
           if (!navigator.geolocation) return fail(new Error('GPS tidak didukung'));
-          navigator.geolocation.getCurrentPosition(ok, fail, { timeout: 8000, enableHighAccuracy: false, maximumAge: 90000 });
+          // Safari fix: simpler options, longer timeout
+          navigator.geolocation.getCurrentPosition(ok, fail, { 
+            timeout: 15000, 
+            enableHighAccuracy: false 
+          });
         });
         lat = pos.coords.latitude;
         lon = pos.coords.longitude;

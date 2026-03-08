@@ -189,16 +189,17 @@ app.get("/api/weather", async (req, res) => {
   if (!adm4) return res.status(400).json({ error: "adm4 parameter required" });
 
   try {
-    const cleanCode = (adm4 as string).replace(/\./g, '');
+    const sAdm4 = String(adm4);
+    const cleanCode = sAdm4.replace(/\./g, '');
     // Try with dots
-    let r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${adm4}`);
+    let r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(sAdm4)}`);
     if (r.ok) {
       const d = await r.json();
       if (d && d.data && d.data.length > 0) return res.json(d);
     }
     
     // Try without dots
-    r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${cleanCode}`);
+    r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(cleanCode)}`);
     if (r.ok) {
       const d = await r.json();
       if (d && d.data && d.data.length > 0) return res.json(d);
@@ -238,12 +239,12 @@ app.get("/api/weather/ip", async (req, res) => {
       return res.status(404).json({ error: "IP location region not found in BMKG database", address: addr });
     }
 
-    const adm4 = region.code;
+    const adm4 = String(region.code);
     const cleanCode = adm4.replace(/\./g, '');
     
-    let weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${adm4}`);
+    let weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(adm4)}`);
     if (!weatherRes.ok) {
-      weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${cleanCode}`);
+      weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(cleanCode)}`);
     }
 
     if (!weatherRes.ok) {
@@ -296,12 +297,12 @@ app.get("/api/weather/forecast", async (req, res) => {
     }
 
     // 3. Fetch Weather from BMKG
-    const adm4 = region.code;
+    const adm4 = String(region.code);
     const cleanCode = adm4.replace(/\./g, '');
     
-    let weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${adm4}`);
+    let weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(adm4)}`);
     if (!weatherRes.ok) {
-      weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${cleanCode}`);
+      weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(cleanCode)}`);
     }
 
     if (!weatherRes.ok) {
