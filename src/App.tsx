@@ -29,6 +29,16 @@ const WARR: Record<string, string> = {
   'UTARA': '↑', 'TIMUR LAUT': '↗', 'TIMUR': '→', 'TENGGARA': '↘', 'SELATAN': '↓', 'BARAT DAYA': '↙', 'BARAT': '←', 'BARAT LAUT': '↖', 'VARIABLE': '↻'
 };
 
+const WD_ID: Record<string, string> = {
+  'N': 'Utara', 'NE': 'Timur Laut', 'E': 'Timur', 'SE': 'Tenggara', 'S': 'Selatan', 'SW': 'Barat Daya', 'W': 'Barat', 'NW': 'Barat Laut',
+  'VARIABLE': 'Berubah-ubah', 'CALM': 'Tenang'
+};
+
+const wdId = (d: string) => {
+  const up = (d || '').toUpperCase();
+  return WD_ID[up] || d || '--';
+};
+
 function wxInfo(code: number, desc: string) {
   const d = (desc || '').toLowerCase();
   let i = WX[code];
@@ -559,7 +569,7 @@ export default function App() {
                 <Compass size={12} /> Arah Angin
               </div>
               <div className="text-3xl font-bold mt-1 mb-1">{warr(cur.wd)}</div>
-              <div className="text-[11px] text-white/40">dari {cur.wd || '--'}</div>
+              <div className="text-[11px] text-white/40">dari {wdId(cur.wd)}</div>
             </div>
             <div className="bg-white/5 border border-white/5 rounded-2xl p-4">
               <div className="flex items-center gap-1.5 text-[10px] text-white/35 uppercase tracking-wider">
@@ -582,6 +592,10 @@ export default function App() {
 
         <div className="px-5 pt-1.5 pb-7 text-center text-[10.5px] text-white/20">
           Data cuaca oleh <b className="text-white/35">BMKG</b> · Badan Meteorologi, Klimatologi, dan Geofisika
+          <div className="mt-2 flex flex-col gap-1">
+            <a href="/api/weather?adm4=31.71.01.1001" target="_blank" className="text-sky-400/40 hover:text-sky-400/60 transition-colors">API via Kode Wilayah</a>
+            <a href="/api/weather/forecast?lat=-6.1754&long=106.8272" target="_blank" className="text-sky-400/40 hover:text-sky-400/60 transition-colors">API via Koordinat (Lat/Long)</a>
+          </div>
         </div>
 
         {toastMsg && (
