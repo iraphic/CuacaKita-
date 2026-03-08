@@ -10,10 +10,26 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const DB_PATH = process.env.NODE_ENV === "production" ? "/tmp/regions.db" : path.join(__dirname, "regions.db");
+// Use process.cwd() for Vercel compatibility
+const PROJECT_ROOT = process.cwd();
+const DB_PATH = process.env.NODE_ENV === "production" 
+  ? "/tmp/regions.db" 
+  : (fs.existsSync(path.join(PROJECT_ROOT, "regions.db")) 
+      ? path.join(PROJECT_ROOT, "regions.db") 
+      : path.join(PROJECT_ROOT, "api", "regions.db"));
+const LOCAL_DB_PATHS = [
+  path.join(PROJECT_ROOT, "regions.db"),
+  path.join(PROJECT_ROOT, "api", "regions.db"),
+  path.join(__dirname, "regions.db"),
+  path.join(__dirname, "api", "regions.db")
+];
+
+// In-memory cache for regions as fallback for SQLite issues on Vercel
+let regionsCache: any[] = [];
+let isSeeding = false;
 
 // Initialize Database
-let db: Database.Database;
+let db: any;
 try {
   db = new Database(DB_PATH);
   db.exec(`
@@ -30,40 +46,64 @@ try {
   `);
 } catch (e) {
   console.error("Database initialization failed, using in-memory database:", e);
-  db = new Database(":memory:");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS regions (
-      code TEXT PRIMARY KEY,
-      name TEXT,
-      type TEXT,
-      province TEXT,
-      city TEXT,
-      district TEXT,
-      village TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_name ON regions(name);
-  `);
+  try {
+    db = new Database(":memory:");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS regions (
+        code TEXT PRIMARY KEY,
+        name TEXT,
+        type TEXT,
+        province TEXT,
+        city TEXT,
+        district TEXT,
+        village TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_name ON regions(name);
+    `);
+  } catch (e2) {
+    console.error("Critical: SQLite failed completely. Falling back to pure JSON in memory.");
+    db = null;
+  }
 }
 
 async function seedDatabase() {
-  const count = db.prepare("SELECT COUNT(*) as count FROM regions").get() as { count: number };
-  if (count.count > 0) {
-    console.log("Database already seeded.");
-    return;
-  }
-
-  console.log("Seeding database from GitHub...");
+  if (isSeeding) return;
+  isSeeding = true;
+  
   try {
-    // Check if we can just copy the local regions.db to /tmp if it exists and we are in production
-    if (process.env.NODE_ENV === "production" && fs.existsSync(path.join(__dirname, "regions.db")) && DB_PATH === "/tmp/regions.db") {
-      console.log("Copying local regions.db to /tmp...");
-      fs.copyFileSync(path.join(__dirname, "regions.db"), DB_PATH);
-      // Re-initialize DB with the new file
-      db = new Database(DB_PATH);
+    if (db) {
       const count = db.prepare("SELECT COUNT(*) as count FROM regions").get() as { count: number };
       if (count.count > 0) {
-        console.log("Database restored from local file.");
+        console.log("Database already seeded.");
+        isSeeding = false;
         return;
+      }
+    }
+
+    console.log("Seeding database from GitHub...");
+    console.log("PROJECT_ROOT:", PROJECT_ROOT);
+    console.log("LOCAL_DB_PATHS:", LOCAL_DB_PATHS);
+    console.log("DB_PATH:", DB_PATH);
+    
+    // Check if we can just copy the local regions.db to /tmp if it exists and we are in production
+    if (db && process.env.NODE_ENV === "production" && DB_PATH === "/tmp/regions.db") {
+      try {
+        let foundPath = LOCAL_DB_PATHS.find(p => fs.existsSync(p));
+        if (foundPath) {
+          console.log("Copying local regions.db to /tmp from:", foundPath);
+          fs.copyFileSync(foundPath, DB_PATH);
+          db = new Database(DB_PATH);
+          const count = db.prepare("SELECT COUNT(*) as count FROM regions").get() as { count: number };
+          if (count.count > 0) {
+            console.log("Database restored from local file.");
+            isSeeding = false;
+            return;
+          }
+        } else {
+          console.warn("Local regions.db not found in any of:", LOCAL_DB_PATHS);
+        }
+      } catch (e) {
+        console.warn("Failed to copy local DB, falling back to fetch:", e);
       }
     }
 
@@ -71,32 +111,39 @@ async function seedDatabase() {
     if (!response.ok) throw new Error("Failed to fetch region data");
     
     const data = await response.json();
-    const insert = db.prepare("INSERT OR REPLACE INTO regions (code, name, type, province, city, district, village) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    regionsCache = data; // Keep in memory as fallback
     
-    db.transaction(() => {
-      for (const prov of data) {
-        const provCode = prov.kode_wilayah.join(".");
-        insert.run(provCode, prov.provinsi, "province", prov.provinsi, null, null, null);
-        
-        for (const city of prov.kota || []) {
-          const cityCode = city.kode_wilayah.join(".");
-          insert.run(cityCode, city.kota, city.type, prov.provinsi, city.kota, null, null);
+    if (db) {
+      const insert = db.prepare("INSERT OR REPLACE INTO regions (code, name, type, province, city, district, village) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      db.transaction(() => {
+        for (const prov of data) {
+          const provCode = prov.kode_wilayah.join(".");
+          insert.run(provCode, prov.provinsi, "province", prov.provinsi, null, null, null);
           
-          for (const kec of city.kecamatan || []) {
-            const kecCode = kec.kode_wilayah.join(".");
-            insert.run(kecCode, kec.kecamatan, "district", prov.provinsi, city.kota, kec.kecamatan, null);
+          for (const city of prov.kota || []) {
+            const cityCode = city.kode_wilayah.join(".");
+            insert.run(cityCode, city.kota, city.type, prov.provinsi, city.kota, null, null);
             
-            for (const desa of kec.desa || []) {
-              const desaCode = desa.kode_wilayah.join(".");
-              insert.run(desaCode, desa.desa, "village", prov.provinsi, city.kota, kec.kecamatan, desa.desa);
+            for (const kec of city.kecamatan || []) {
+              const kecCode = kec.kode_wilayah.join(".");
+              insert.run(kecCode, kec.kecamatan, "district", prov.provinsi, city.kota, kec.kecamatan, null);
+              
+              for (const desa of kec.desa || []) {
+                const desaCode = desa.kode_wilayah.join(".");
+                insert.run(desaCode, desa.desa, "village", prov.provinsi, city.kota, kec.kecamatan, desa.desa);
+              }
             }
           }
         }
-      }
-    })();
-    console.log("Database seeding complete.");
+      })();
+      console.log("Database seeding complete.");
+    } else {
+      console.log("Pure JSON seeding complete (SQLite disabled).");
+    }
   } catch (error) {
     console.error("Error seeding database:", error);
+  } finally {
+    isSeeding = false;
   }
 }
 
@@ -109,77 +156,155 @@ app.get("/api/search-region", (req, res) => {
   const { q, type } = req.query;
   if (!q) return res.status(400).json({ error: "Query required" });
 
-  let query = "SELECT * FROM regions WHERE name LIKE ? ";
-  const params: any[] = [`%${q}%`];
+  if (db) {
+    let query = "SELECT * FROM regions WHERE name LIKE ? ";
+    const params: any[] = [`%${q}%`];
 
-  if (type) {
-    query += " AND type = ?";
-    params.push(type);
+    if (type) {
+      query += " AND type = ?";
+      params.push(type);
+    }
+
+    query += " LIMIT 20";
+    
+    try {
+      const results = db.prepare(query).all(...params);
+      return res.json(results);
+    } catch (e) {
+      console.error("SQLite search failed:", e);
+    }
   }
 
-  query += " LIMIT 20";
+  // Fallback to in-memory search if SQLite fails or is disabled
+  const query = String(q).toLowerCase();
+  const results: any[] = [];
   
-  const results = db.prepare(query).all(...params);
+  for (const prov of regionsCache) {
+    if (prov.provinsi.toLowerCase().includes(query)) {
+      results.push({ code: prov.kode_wilayah.join("."), name: prov.provinsi, type: "province", province: prov.provinsi });
+    }
+    for (const city of prov.kota || []) {
+      if (city.kota.toLowerCase().includes(query)) {
+        results.push({ code: city.kode_wilayah.join("."), name: city.kota, type: city.type, province: prov.provinsi, city: city.kota });
+      }
+      for (const kec of city.kecamatan || []) {
+        if (kec.kecamatan.toLowerCase().includes(query)) {
+          results.push({ code: kec.kode_wilayah.join("."), name: kec.kecamatan, type: "district", province: prov.provinsi, city: city.kota, district: kec.kecamatan });
+        }
+        for (const desa of kec.desa || []) {
+          if (desa.desa.toLowerCase().includes(query)) {
+            results.push({ code: desa.kode_wilayah.join("."), name: desa.desa, type: "village", province: prov.provinsi, city: city.kota, district: kec.kecamatan, village: desa.desa });
+          }
+          if (results.length >= 20) break;
+        }
+        if (results.length >= 20) break;
+      }
+      if (results.length >= 20) break;
+    }
+    if (results.length >= 20) break;
+  }
   res.json(results);
 });
 
 app.get("/api/db-status", async (req, res) => {
-  let count = db.prepare("SELECT COUNT(*) as count FROM regions").get() as { count: number };
-  if (count.count === 0) {
-    console.log("Database empty, re-triggering seed...");
-    await seedDatabase();
-    count = db.prepare("SELECT COUNT(*) as count FROM regions").get() as { count: number };
+  if (db) {
+    try {
+      let count = db.prepare("SELECT COUNT(*) as count FROM regions").get() as { count: number };
+      if (count.count === 0) {
+        await seedDatabase();
+        count = db.prepare("SELECT COUNT(*) as count FROM regions").get() as { count: number };
+      }
+      return res.json({ count: count.count, type: 'sqlite' });
+    } catch (e) {
+      console.error("DB Status SQLite check failed:", e);
+    }
   }
-  res.json({ count: count.count });
+  
+  if (regionsCache.length === 0) await seedDatabase();
+  res.json({ count: regionsCache.length, type: 'memory' });
 });
 
 function resolveRegion(village: any, district: any, city: any, province: any) {
-  // Try to find the most specific match
-  let result = null;
-  
-  // 1. Exact village + district match
-  if (village && district) {
-    result = db.prepare("SELECT * FROM regions WHERE village LIKE ? AND district LIKE ? AND type = 'village'").get(`${village}`, `${district}`);
-  }
-  
-  // 2. Fuzzy village + district match
-  if (!result && village && district) {
-    result = db.prepare("SELECT * FROM regions WHERE village LIKE ? AND district LIKE ? AND type = 'village'").get(`%${village}%`, `%${district}%`);
+  if (db) {
+    try {
+      // Try to find the most specific match
+      let result = null;
+      
+      // 1. Exact village + district match
+      if (village && district) {
+        result = db.prepare("SELECT * FROM regions WHERE village LIKE ? AND district LIKE ? AND type = 'village'").get(`${village}`, `${district}`);
+      }
+      
+      // 2. Fuzzy village + district match
+      if (!result && village && district) {
+        result = db.prepare("SELECT * FROM regions WHERE village LIKE ? AND district LIKE ? AND type = 'village'").get(`%${village}%`, `%${district}%`);
+      }
+
+      // 3. Village only match (if unique enough)
+      if (!result && village) {
+        result = db.prepare("SELECT * FROM regions WHERE village LIKE ? AND type = 'village'").get(`${village}`);
+        if (!result) {
+          result = db.prepare("SELECT * FROM regions WHERE village LIKE ? AND type = 'village'").get(`%${village}%`);
+        }
+      }
+      
+      // 4. District + City match
+      if (!result && district && city) {
+        result = db.prepare("SELECT * FROM regions WHERE district LIKE ? AND city LIKE ? AND type = 'district'").get(`${district}`, `${city}`);
+        if (!result) {
+          result = db.prepare("SELECT * FROM regions WHERE district LIKE ? AND city LIKE ? AND type = 'district'").get(`%${district}%`, `%${city}%`);
+        }
+      }
+
+      // 5. District only match
+      if (!result && district) {
+        result = db.prepare("SELECT * FROM regions WHERE district LIKE ? AND type = 'district'").get(`${district}`);
+        if (!result) {
+          result = db.prepare("SELECT * FROM regions WHERE district LIKE ? AND type = 'district'").get(`%${district}%`);
+        }
+      }
+      
+      // 6. City only match
+      if (!result && city) {
+        result = db.prepare("SELECT * FROM regions WHERE city LIKE ? AND (type = 'kota' OR type = 'kabupaten')").get(`${city}`);
+        if (!result) {
+          result = db.prepare("SELECT * FROM regions WHERE city LIKE ? AND (type = 'kota' OR type = 'kabupaten')").get(`%${city}%`);
+        }
+      }
+
+      if (result) return result;
+    } catch (e) {
+      console.error("SQLite resolve failed:", e);
+    }
   }
 
-  // 3. Village only match (if unique enough)
-  if (!result && village) {
-    result = db.prepare("SELECT * FROM regions WHERE village LIKE ? AND type = 'village'").get(`${village}`);
-    if (!result) {
-      result = db.prepare("SELECT * FROM regions WHERE village LIKE ? AND type = 'village'").get(`%${village}%`);
-    }
-  }
-  
-  // 4. District + City match
-  if (!result && district && city) {
-    result = db.prepare("SELECT * FROM regions WHERE district LIKE ? AND city LIKE ? AND type = 'district'").get(`${district}`, `${city}`);
-    if (!result) {
-      result = db.prepare("SELECT * FROM regions WHERE district LIKE ? AND city LIKE ? AND type = 'district'").get(`%${district}%`, `%${city}%`);
+  // Pure JSON fallback
+  const v = String(village || '').toLowerCase();
+  const d = String(district || '').toLowerCase();
+  const c = String(city || '').toLowerCase();
+  const p = String(province || '').toLowerCase();
+
+  for (const prov of regionsCache) {
+    for (const city of prov.kota || []) {
+      for (const kec of city.kecamatan || []) {
+        if (v && d && kec.kecamatan.toLowerCase().includes(d)) {
+          for (const desa of kec.desa || []) {
+            if (desa.desa.toLowerCase().includes(v)) {
+              return { code: desa.kode_wilayah.join("."), name: desa.desa, type: "village", province: prov.provinsi, city: city.kota, district: kec.kecamatan, village: desa.desa };
+            }
+          }
+        }
+        if (d && kec.kecamatan.toLowerCase().includes(d)) {
+          return { code: kec.kode_wilayah.join("."), name: kec.kecamatan, type: "district", province: prov.provinsi, city: city.kota, district: kec.kecamatan };
+        }
+      }
+      if (c && city.kota.toLowerCase().includes(c)) {
+        return { code: city.kode_wilayah.join("."), name: city.kota, type: city.type, province: prov.provinsi, city: city.kota };
+      }
     }
   }
 
-  // 5. District only match
-  if (!result && district) {
-    result = db.prepare("SELECT * FROM regions WHERE district LIKE ? AND type = 'district'").get(`${district}`);
-    if (!result) {
-      result = db.prepare("SELECT * FROM regions WHERE district LIKE ? AND type = 'district'").get(`%${district}%`);
-    }
-  }
-  
-  // 6. City only match
-  if (!result && city) {
-    result = db.prepare("SELECT * FROM regions WHERE city LIKE ? AND (type = 'kota' OR type = 'kabupaten')").get(`${city}`);
-    if (!result) {
-      result = db.prepare("SELECT * FROM regions WHERE city LIKE ? AND (type = 'kota' OR type = 'kabupaten')").get(`%${city}%`);
-    }
-  }
-
-  return result;
+  return null;
 }
 
 app.get("/api/resolve-region", (req, res) => {

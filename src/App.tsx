@@ -178,18 +178,25 @@ export default function App() {
         throw gpsErr;
       }
 
-      if (lat && lon) {
+      if (lat !== null && lon !== null && !isNaN(lat) && !isNaN(lon)) {
         setLoadTitle('Menentukan wilayah...');
         setLoadStep(`${lat.toFixed(4)}, ${lon.toFixed(4)}`);
         
         // Use backend forecast endpoint (more robust)
-        const r = await fetch(`/api/weather/forecast?lat=${lat}&long=${lon}`);
+        // Use URL object to ensure valid URL construction
+        const url = new URL('/api/weather/forecast', window.location.origin);
+        url.searchParams.append('lat', String(lat));
+        url.searchParams.append('long', String(lon));
+        
+        const r = await fetch(url.toString());
         if (!r.ok) {
           const errData = await r.json();
           throw new Error(errData.error || 'Gagal mengambil data cuaca');
         }
         const data = await r.json();
         handleWeatherData(data.weather, `${data.region.village || data.region.district}, ${data.region.city}`);
+      } else {
+        throw new Error('Koordinat tidak valid');
       }
     } catch (err: any) {
       console.error("App error:", err);
@@ -252,11 +259,20 @@ export default function App() {
     try {
       // 1. Search Nominatim for general places
       // Note: User-Agent is a forbidden header in browsers, removed it to avoid Safari errors
-      const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(searchQuery + ', Indonesia')}&format=json&addressdetails=1&limit=5&accept-language=id`);
+      const url = new URL('https://nominatim.openstreetmap.org/search');
+      url.searchParams.append('q', searchQuery + ', Indonesia');
+      url.searchParams.append('format', 'json');
+      url.searchParams.append('addressdetails', '1');
+      url.searchParams.append('limit', '5');
+      url.searchParams.append('accept-language', 'id');
+      
+      const r = await fetch(url.toString());
       const nomRes = await r.json();
       
       // 2. Search our backend for specific BMKG regions
-      const br = await fetch(`/api/search-region?q=${encodeURIComponent(searchQuery)}`);
+      const brUrl = new URL('/api/search-region', window.location.origin);
+      brUrl.searchParams.append('q', searchQuery);
+      const br = await fetch(brUrl.toString());
       const backRes = await br.json();
       
       // Combine results, marking backend ones
@@ -273,6 +289,24 @@ export default function App() {
     }
   };
 
+  const safeFormatDate = (date: Date, options: Intl.DateTimeFormatOptions) => {
+    try {
+      return date.toLocaleDateString('id-ID', options);
+    } catch (e) {
+      console.warn('id-ID locale not supported, falling back to default');
+      return date.toLocaleDateString(undefined, options);
+    }
+  };
+
+  const safeFormatTime = (date: Date, options: Intl.DateTimeFormatOptions) => {
+    try {
+      return date.toLocaleTimeString('id-ID', options);
+    } catch (e) {
+      console.warn('id-ID locale not supported, falling back to default');
+      return date.toLocaleTimeString(undefined, options);
+    }
+  };
+
   const selectPlace = async (place: any) => {
     setScreen('loading');
     setLoadTitle('Mengambil data cuaca...');
@@ -285,7 +319,10 @@ export default function App() {
         if (!wd) throw new Error('Data cuaca tidak tersedia untuk wilayah ini');
         handleWeatherData(wd, place.name);
       } else {
-        const r = await fetch(`/api/weather/forecast?lat=${place.lat}&long=${place.lon}`);
+        const url = new URL('/api/weather/forecast', window.location.origin);
+        url.searchParams.append('lat', String(place.lat));
+        url.searchParams.append('long', String(place.lon));
+        const r = await fetch(url.toString());
         if (!r.ok) {
           const errData = await r.json();
           throw new Error(errData.error || 'Gagal mengambil data cuaca');
@@ -440,7 +477,7 @@ export default function App() {
           <div className="text-lg font-normal text-white/80 mt-2">{cur.weather_desc || info.l}</div>
           <div className="text-xs text-white/40 mt-1">{[bl.kecamatan, bl.kotkab, bl.provinsi].filter(Boolean).join(' · ')}</div>
           <div className="text-[11px] text-white/30 mt-2 pl-0.5">
-            Data pukul {updDate.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} · {updDate.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'short' })}
+            Data pukul {safeFormatTime(updDate, { hour: '2-digit', minute: '2-digit' })} · {safeFormatDate(updDate, { weekday: 'long', day: 'numeric', month: 'short' })}
           </div>
         </div>
 
@@ -470,7 +507,7 @@ export default function App() {
               const time = new Date(f.local_datetime || f.utc_datetime);
               return (
                 <div key={i} className={`shrink-0 w-16 rounded-2xl p-3 text-center border ${i === 0 ? 'bg-sky-500/20 border-sky-500/40' : 'bg-white/6 border-white/6'}`}>
-                  <div className="text-[10px] text-white/45">{i === 0 ? 'Kini' : time.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false })}</div>
+                  <div className="text-[10px] text-white/45">{i === 0 ? 'Kini' : safeFormatTime(time, { hour: '2-digit', minute: '2-digit', hour12: false })}</div>
                   <div className="text-2xl my-1">{fi.e}</div>
                   <div className="text-sm font-semibold">{Math.round(f.t ?? 0)}°</div>
                 </div>
@@ -488,7 +525,7 @@ export default function App() {
               const hi = Math.max(...temps), lo = Math.min(...temps);
               const mid = df[Math.floor(df.length / 2)] || df[0];
               const di = wxInfo(mid.weather, mid.weather_desc);
-              const dayLabel = i === 0 ? 'Hari Ini' : i === 1 ? 'Besok' : new Date(k).toLocaleDateString('id-ID', { weekday: 'long' });
+              const dayLabel = i === 0 ? 'Hari Ini' : i === 1 ? 'Besok' : safeFormatDate(new Date(k), { weekday: 'long' });
               return (
                 <div key={i} className="flex items-center gap-2.5 px-4 py-3 border-b border-white/5 last:border-none">
                   <div className="shrink-0 w-16 text-sm font-medium">{dayLabel}</div>
@@ -533,7 +570,7 @@ export default function App() {
                 <RefreshCw size={12} /> Update BMKG
               </div>
               <div className="text-sm font-medium mt-2 leading-tight">
-                {analysisDate ? analysisDate.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '--'}
+                {analysisDate ? safeFormatDate(analysisDate, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' } as any) : '--'}
               </div>
               <div className="text-[11px] text-white/40 mt-1">produksi data</div>
             </div>
