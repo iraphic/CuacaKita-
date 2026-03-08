@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { MapPin, RefreshCw, Search, Droplets, Wind, Cloud, Eye, Compass, Info } from 'lucide-react';
+import { MapPin, RefreshCw, Search, Droplets, Wind, Cloud, Eye, Compass, Info, ChevronRight, ArrowLeft } from 'lucide-react';
 
 // ── WEATHER MAPPING ──
 const WX: Record<number, { e: string; l: string; t: string }> = {
@@ -85,7 +85,7 @@ interface WeatherData {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState<'loading' | 'error' | 'weather'>('loading');
+  const [screen, setScreen] = useState<'loading' | 'error' | 'weather' | 'pick-region'>('loading');
   const [loadTitle, setLoadTitle] = useState('Mendeteksi lokasi...');
   const [loadStep, setLoadStep] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
@@ -98,6 +98,14 @@ export default function App() {
   const [isSearching, setIsSearching] = useState(false);
   const [toastMsg, setToastMsg] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  // Manual Picker States
+  const [provinces, setProvinces] = useState<any[]>([]);
+  const [cities, setCities] = useState<any[]>([]);
+  const [districts, setDistricts] = useState<any[]>([]);
+  const [selectedProvince, setSelectedProvince] = useState<string | null>(null);
+  const [selectedCity, setSelectedCity] = useState<string | null>(null);
+  const [pickerLoading, setPickerLoading] = useState(false);
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -126,6 +134,54 @@ export default function App() {
     } catch (e) { 
       console.error("Probe BMKG error:", e);
       return null; 
+    }
+  };
+
+  const fetchProvinces = async () => {
+    setPickerLoading(true);
+    try {
+      const r = await fetch('/api/provinces');
+      const data = await r.json();
+      setProvinces(data);
+      setScreen('pick-region');
+    } catch (e) {
+      console.error(e);
+      setScreen('error');
+      setErrorMsg('Gagal mengambil daftar provinsi.');
+    } finally {
+      setPickerLoading(false);
+    }
+  };
+
+  const fetchCities = async (prov: string) => {
+    setPickerLoading(true);
+    setSelectedProvince(prov);
+    setSelectedCity(null);
+    setDistricts([]);
+    try {
+      const r = await fetch(`/api/cities?province=${encodeURIComponent(prov)}`);
+      const data = await r.json();
+      setCities(data);
+    } catch (e) {
+      console.error(e);
+      showToast('Gagal mengambil daftar kota.');
+    } finally {
+      setPickerLoading(false);
+    }
+  };
+
+  const fetchDistricts = async (city: string) => {
+    setPickerLoading(true);
+    setSelectedCity(city);
+    try {
+      const r = await fetch(`/api/districts?city=${encodeURIComponent(city)}`);
+      const data = await r.json();
+      setDistricts(data);
+    } catch (e) {
+      console.error(e);
+      showToast('Gagal mengambil daftar kecamatan.');
+    } finally {
+      setPickerLoading(false);
     }
   };
 
@@ -209,7 +265,8 @@ export default function App() {
         else if (err.code === 3) msg = 'Waktu GPS habis. Coba lagi.';
       }
       setErrorMsg(msg);
-      setScreen('error');
+      // If location fails, go to pick-region instead of error screen
+      fetchProvinces();
     } finally {
       setIsRefreshing(false);
     }
@@ -362,6 +419,94 @@ export default function App() {
             <div className="text-base font-medium text-white/85">{loadTitle}</div>
             <div className="text-xs text-white/40 mt-1.5 min-h-[18px]">{loadStep}</div>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (screen === 'pick-region') {
+    return (
+      <div 
+        id="app" 
+        className={`${theme} min-h-dvh flex flex-col transition-all duration-1000`}
+        style={{
+          background: `linear-gradient(175deg, var(--g1, #0c4a6e) 0%, var(--g2, #0ea5e9) 45%, #07111f 100%)`
+        }}
+      >
+        <div className="px-5 pt-12 pb-6 flex items-center justify-between fi">
+          <div className="flex items-center gap-3">
+            {selectedProvince && (
+              <button 
+                className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center"
+                onClick={() => {
+                  if (selectedCity) {
+                    setSelectedCity(null);
+                    setDistricts([]);
+                  } else {
+                    setSelectedProvince(null);
+                    setCities([]);
+                  }
+                }}
+              >
+                <ArrowLeft size={18} />
+              </button>
+            )}
+            <div>
+              <div className="text-xl font-bold">Pilih Wilayah</div>
+              <div className="text-xs text-white/40 mt-0.5">
+                {!selectedProvince ? 'Pilih Provinsi' : !selectedCity ? `Provinsi ${selectedProvince}` : `Kota/Kab ${selectedCity}`}
+              </div>
+            </div>
+          </div>
+          <button className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center" onClick={() => setScreen('error')}>
+            <Search size={18} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto no-scrollbar px-5 pb-10 flex flex-col gap-2 fi2">
+          {pickerLoading && <div className="text-center py-10 text-white/40 animate-pulse">Memuat data...</div>}
+          
+          {!pickerLoading && !selectedProvince && provinces.map((p, i) => (
+            <div 
+              key={i} 
+              className="p-4 bg-white/5 border border-white/8 rounded-2xl cursor-pointer flex items-center justify-between active:bg-white/10 transition-colors"
+              onClick={() => fetchCities(p.name)}
+            >
+              <div className="text-sm font-medium">{p.name}</div>
+              <ChevronRight size={16} className="text-white/20" />
+            </div>
+          ))}
+
+          {!pickerLoading && selectedProvince && !selectedCity && cities.map((c, i) => (
+            <div 
+              key={i} 
+              className="p-4 bg-white/5 border border-white/8 rounded-2xl cursor-pointer flex items-center justify-between active:bg-white/10 transition-colors"
+              onClick={() => fetchDistricts(c.name)}
+            >
+              <div className="flex flex-col">
+                <div className="text-sm font-medium">{c.name}</div>
+                <div className="text-[10px] text-white/30 uppercase tracking-wider mt-0.5">{c.type}</div>
+              </div>
+              <ChevronRight size={16} className="text-white/20" />
+            </div>
+          ))}
+
+          {!pickerLoading && selectedCity && districts.map((d, i) => (
+            <div 
+              key={i} 
+              className="p-4 bg-white/5 border border-white/8 rounded-2xl cursor-pointer flex items-center justify-between active:bg-white/10 transition-colors"
+              onClick={() => selectPlace({ ...d, isBackend: true, province: selectedProvince, city: selectedCity })}
+            >
+              <div className="text-sm font-medium">{d.name}</div>
+              <ChevronRight size={16} className="text-white/20" />
+            </div>
+          ))}
+        </div>
+
+        <div className="p-6 text-center">
+          <button className="text-xs text-white/30 underline" onClick={() => setScreen('error')}>
+            Kembali ke Deteksi Otomatis
+          </button>
         </div>
       </div>
     );

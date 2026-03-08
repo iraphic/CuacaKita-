@@ -152,6 +152,72 @@ seedDatabase();
 app.use(express.json());
 
 // API Routes
+app.get("/api/provinces", (req, res) => {
+  if (db) {
+    try {
+      const results = db.prepare("SELECT DISTINCT province as name FROM regions WHERE province IS NOT NULL ORDER BY province ASC").all();
+      return res.json(results);
+    } catch (e) {
+      console.error("SQLite provinces failed:", e);
+    }
+  }
+  
+  const provinces = Array.from(new Set(regionsCache.map(p => p.provinsi))).sort();
+  res.json(provinces.map(p => ({ name: p })));
+});
+
+app.get("/api/cities", (req, res) => {
+  const { province } = req.query;
+  if (!province) return res.status(400).json({ error: "Province required" });
+
+  if (db) {
+    try {
+      const results = db.prepare("SELECT DISTINCT city as name, type, code FROM regions WHERE province = ? AND city IS NOT NULL AND (type = 'kota' OR type = 'kabupaten') ORDER BY city ASC").all(province);
+      return res.json(results);
+    } catch (e) {
+      console.error("SQLite cities failed:", e);
+    }
+  }
+
+  const prov = regionsCache.find(p => p.provinsi === province);
+  if (!prov) return res.json([]);
+  
+  const cities = (prov.kota || []).map((c: any) => ({
+    name: c.kota,
+    type: c.type,
+    code: c.kode_wilayah.join(".")
+  })).sort((a: any, b: any) => a.name.localeCompare(b.name));
+  
+  res.json(cities);
+});
+
+app.get("/api/districts", (req, res) => {
+  const { city } = req.query;
+  if (!city) return res.status(400).json({ error: "City required" });
+
+  if (db) {
+    try {
+      const results = db.prepare("SELECT DISTINCT district as name, code FROM regions WHERE city = ? AND district IS NOT NULL AND type = 'district' ORDER BY district ASC").all(city);
+      return res.json(results);
+    } catch (e) {
+      console.error("SQLite districts failed:", e);
+    }
+  }
+
+  for (const prov of regionsCache) {
+    const c = (prov.kota || []).find((ct: any) => ct.kota === city);
+    if (c) {
+      const districts = (c.kecamatan || []).map((k: any) => ({
+        name: k.kecamatan,
+        code: k.kode_wilayah.join(".")
+      })).sort((a: any, b: any) => a.name.localeCompare(b.name));
+      return res.json(districts);
+    }
+  }
+  
+  res.json([]);
+});
+
 app.get("/api/search-region", (req, res) => {
   const { q, type } = req.query;
   if (!q) return res.status(400).json({ error: "Query required" });
