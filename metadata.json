@@ -1,0 +1,7 @@
+{
+  "name": "Cuaca BMKG",
+  "description": "Aplikasi prakiraan cuaca akurat di Indonesia menggunakan data resmi BMKG, dengan deteksi lokasi otomatis dan pencarian manual.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
