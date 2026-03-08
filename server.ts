@@ -9,7 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.NODE_ENV === "production" ? "/tmp/regions.db" : path.join(__dirname, "regions.db");
 
 // Initialize Database
@@ -54,6 +54,19 @@ async function seedDatabase() {
 
   console.log("Seeding database from GitHub...");
   try {
+    // Check if we can just copy the local regions.db to /tmp if it exists and we are in production
+    if (process.env.NODE_ENV === "production" && fs.existsSync(path.join(__dirname, "regions.db")) && DB_PATH === "/tmp/regions.db") {
+      console.log("Copying local regions.db to /tmp...");
+      fs.copyFileSync(path.join(__dirname, "regions.db"), DB_PATH);
+      // Re-initialize DB with the new file
+      db = new Database(DB_PATH);
+      const count = db.prepare("SELECT COUNT(*) as count FROM regions").get() as { count: number };
+      if (count.count > 0) {
+        console.log("Database restored from local file.");
+        return;
+      }
+    }
+
     const response = await fetch("https://raw.githubusercontent.com/RRafly/Kode-Wilayah-CSV-to-JSON/main/wilayah_id.json");
     if (!response.ok) throw new Error("Failed to fetch region data");
     
@@ -335,6 +348,19 @@ if (process.env.NODE_ENV !== "production") {
   });
 }
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+export default app;
+
+if (process.env.NODE_ENV !== "production") {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+} else {
+  // In production (like Cloud Run), we still need to listen
+  // But on Vercel, we export the app.
+  // We can check if we are in a serverless environment.
+  if (!process.env.VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  }
+}
