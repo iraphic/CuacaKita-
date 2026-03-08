@@ -10,22 +10,40 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
-const DB_PATH = path.join(__dirname, "regions.db");
+const DB_PATH = process.env.NODE_ENV === "production" ? "/tmp/regions.db" : path.join(__dirname, "regions.db");
 
 // Initialize Database
-const db = new Database(DB_PATH);
-db.exec(`
-  CREATE TABLE IF NOT EXISTS regions (
-    code TEXT PRIMARY KEY,
-    name TEXT,
-    type TEXT,
-    province TEXT,
-    city TEXT,
-    district TEXT,
-    village TEXT
-  );
-  CREATE INDEX IF NOT EXISTS idx_name ON regions(name);
-`);
+let db: Database.Database;
+try {
+  db = new Database(DB_PATH);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS regions (
+      code TEXT PRIMARY KEY,
+      name TEXT,
+      type TEXT,
+      province TEXT,
+      city TEXT,
+      district TEXT,
+      village TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_name ON regions(name);
+  `);
+} catch (e) {
+  console.error("Database initialization failed, using in-memory database:", e);
+  db = new Database(":memory:");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS regions (
+      code TEXT PRIMARY KEY,
+      name TEXT,
+      type TEXT,
+      province TEXT,
+      city TEXT,
+      district TEXT,
+      village TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_name ON regions(name);
+  `);
+}
 
 async function seedDatabase() {
   const count = db.prepare("SELECT COUNT(*) as count FROM regions").get() as { count: number };

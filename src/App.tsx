@@ -179,11 +179,15 @@ export default function App() {
         handleWeatherData(data.weather, `${data.region.village || data.region.district}, ${data.region.city}`);
       }
     } catch (err: any) {
-      console.error(err);
-      let msg = err.message || 'Terjadi kesalahan.';
-      if (err.code === 1) msg = 'Izin lokasi ditolak.\nAktifkan GPS di pengaturan browser Anda.';
-      else if (err.code === 2) msg = 'Posisi tidak tersedia.\nPastikan GPS aktif.';
-      else if (err.code === 3) msg = 'Waktu GPS habis. Coba lagi.';
+      console.error("App error:", err);
+      let msg = 'Terjadi kesalahan.';
+      if (err) {
+        if (typeof err === 'string') msg = err;
+        else if (err.message) msg = err.message;
+        else if (err.code === 1) msg = 'Izin lokasi ditolak.\nAktifkan GPS di pengaturan browser Anda.';
+        else if (err.code === 2) msg = 'Posisi tidak tersedia.\nPastikan GPS aktif.';
+        else if (err.code === 3) msg = 'Waktu GPS habis. Coba lagi.';
+      }
       setErrorMsg(msg);
       setScreen('error');
     } finally {
