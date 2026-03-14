@@ -761,12 +761,12 @@ export default function App() {
         <div className="px-5 pt-1.5 pb-7 text-center text-[10.5px] text-white/20">
           {sourceTitle}
           <div className="mt-2 flex flex-col gap-1">
-            <a href="/api/weather?adm4=31.71.01.1001" target="_blank" className="text-sky-400/40 hover:text-sky-400/60 transition-colors">API via Kode Wilayah</a>
-            <a href="/api/weather/forecast?lat=-6.1754&long=106.8272" target="_blank" className="text-sky-400/40 hover:text-sky-400/60 transition-colors">API via Koordinat (Lat/Long)</a>
+            {/* <a href="/api/weather?adm4=31.71.01.1001" target="_blank" className="text-sky-400/40 hover:text-sky-400/60 transition-colors">API via Kode Wilayah</a>
+             < a href="/api/weather/forecast?lat=-6.1754&long=106.8272" target="_blank" className="text-sky-400/40 hover:text-sky-400/60 transition-colors">API via Koordinat (Lat/Long)</a>*/}
           </div>
           {dataSource === 'de4a' && (
             <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400/60 text-[9px]">
-              ⚠️ BMKG tidak tersedia · menggunakan sumber alternatif
+              ⚠️ BMKG tidak tersedia · menggunakan <a href="https://openapi.de4a.space/docs#GET/api/weather/forecast" target="_blank">sumber alternatif</a>
             </div>
           )}
         </div>
