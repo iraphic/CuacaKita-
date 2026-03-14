@@ -1,5 +1,4 @@
 import express from "express";
-import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -9,7 +8,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json());
 
-// ─── In-memory cache (SQLite dihapus karena tidak kompatibel di Vercel) ───
+// ─── In-memory cache ──────────────────────────────────────────────────────────
 let regionsCache: any[] = [];
 let isSeeding = false;
 let seedingPromise: Promise<void> | null = null;
@@ -60,7 +59,6 @@ function resolveRegion(
   for (const prov of regionsCache) {
     for (const ct of prov.kota || []) {
       for (const kec of ct.kecamatan || []) {
-        // Village + district match
         if (v && d && kec.kecamatan.toLowerCase().includes(d)) {
           for (const desa of kec.desa || []) {
             if (desa.desa.toLowerCase().includes(v)) {
@@ -76,7 +74,6 @@ function resolveRegion(
             }
           }
         }
-        // District match
         if (d && kec.kecamatan.toLowerCase().includes(d)) {
           return {
             code: kec.kode_wilayah.join("."),
@@ -88,7 +85,6 @@ function resolveRegion(
           };
         }
       }
-      // City match
       if (c && ct.kota.toLowerCase().includes(c)) {
         return {
           code: ct.kode_wilayah.join("."),
@@ -101,6 +97,37 @@ function resolveRegion(
     }
   }
   return null;
+}
+
+// ─── Helper: normalize de4a response → format BMKG ───────────────────────────
+function normalizeDe4aToWeather(de4aData: any, region?: any): any {
+  const item = de4aData.data?.[0];
+  if (!item) throw new Error("Invalid de4a response");
+  return {
+    data: [
+      {
+        lokasi: {
+          provinsi:  item.location.province,
+          kotkab:    item.location.city,
+          kecamatan: item.location.subdistrict,
+          desa:      item.location.village,
+          lon:       item.location.longitude,
+          lat:       item.location.latitude,
+          ...(region ? { adm4: region.code } : {}),
+        },
+        // cuaca field identical structure to BMKG — array of arrays, same item fields
+        cuaca: item.weather,
+      },
+    ],
+  };
+}
+
+// ─── Helper: fetch de4a fallback ─────────────────────────────────────────────
+async function fetchDe4a(lat: any, lon: any): Promise<any> {
+  const url = `https://openapi.de4a.space/api/weather/forecast?lat=${lat}&long=${lon}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`de4a responded ${res.status}`);
+  return await res.json();
 }
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
@@ -230,6 +257,7 @@ app.get("/api/weather", async (req, res) => {
   }
 });
 
+// ─── /api/weather/forecast — BMKG with de4a fallback ─────────────────────────
 app.get("/api/weather/forecast", async (req, res) => {
   const { lat, long, lon } = req.query;
   const latitude = lat;
@@ -242,6 +270,7 @@ app.get("/api/weather/forecast", async (req, res) => {
   try {
     await ensureData();
 
+    // Reverse geocode
     const revRes = await fetch(
       `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
       { headers: { "User-Agent": "BMKG-Weather-App/1.0" } }
@@ -251,37 +280,86 @@ app.get("/api/weather/forecast", async (req, res) => {
     const revData = await revRes.json();
     const addr = revData.address || {};
 
-    const village = addr.village || addr.suburb || addr.neighbourhood || addr.hamlet;
+    const village  = addr.village || addr.suburb || addr.neighbourhood || addr.hamlet;
     const district = addr.city_district || addr.district || addr.suburb;
-    const city = addr.city || addr.town || addr.municipality || addr.county;
-    const state = addr.state;
+    const city     = addr.city || addr.town || addr.municipality || addr.county;
+    const state    = addr.state;
 
     const region = resolveRegion(village, district, city, state);
+
+    // ── No region found → go straight to de4a ────────────────────────────────
     if (!region) {
-      return res.status(404).json({ error: "Region not found in BMKG database", address: addr });
+      console.warn("[CuacaKita] Region not found in BMKG DB, using de4a fallback");
+      try {
+        const fbRaw = await fetchDe4a(latitude, longitude);
+        const weather = normalizeDe4aToWeather(fbRaw);
+        const loc = fbRaw.data?.[0]?.location || {};
+        return res.json({
+          source: "de4a",
+          region: { province: loc.province, city: loc.city, district: loc.subdistrict, village: loc.village },
+          address: addr,
+          weather,
+        });
+      } catch (fbErr: any) {
+        return res.status(404).json({ error: "Region not found & fallback failed", detail: fbErr.message, address: addr });
+      }
     }
 
-    const adm4 = String(region.code);
+    // ── Try BMKG (dot format, then no-dot format) ─────────────────────────────
+    const adm4      = String(region.code);
     const cleanCode = adm4.replace(/\./g, "");
 
     let weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(adm4)}`);
     if (!weatherRes.ok) {
       weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(cleanCode)}`);
     }
-    if (!weatherRes.ok) {
-      return res.status(404).json({ error: "Weather data not found for this region", region });
+
+    if (weatherRes.ok) {
+      const weatherData = await weatherRes.json();
+      if (weatherData?.data?.length > 0) {
+        return res.json({
+          source: "bmkg",
+          region,
+          address: addr,
+          weather: weatherData,
+        });
+      }
     }
 
-    const weatherData = await weatherRes.json();
-    res.json({ region, address: addr, weather: weatherData });
+    // ── BMKG returned nothing → fallback de4a ────────────────────────────────
+    console.warn("[CuacaKita] BMKG empty/failed for region, using de4a fallback");
+    try {
+      const fbRaw = await fetchDe4a(latitude, longitude);
+      const weather = normalizeDe4aToWeather(fbRaw, region);
+      return res.json({ source: "de4a", region, address: addr, weather });
+    } catch (fbErr: any) {
+      return res.status(503).json({ error: "BMKG & fallback both failed", detail: fbErr.message, region });
+    }
+
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    // ── Unexpected top-level error → last resort de4a ─────────────────────────
+    console.error("[CuacaKita] Unexpected error, last-resort de4a:", error.message);
+    try {
+      const fbRaw = await fetchDe4a(latitude, longitude);
+      const weather = normalizeDe4aToWeather(fbRaw);
+      const loc = fbRaw.data?.[0]?.location || {};
+      return res.json({
+        source: "de4a",
+        region: { province: loc.province, city: loc.city, district: loc.subdistrict, village: loc.village },
+        address: {},
+        weather,
+        fallbackReason: error.message,
+      });
+    } catch (fbErr: any) {
+      return res.status(500).json({ error: error.message, fallbackError: fbErr.message });
+    }
   }
 });
 
+// ─── /api/weather/ip — IP-based with de4a fallback ───────────────────────────
 app.get("/api/weather/ip", async (req, res) => {
-  const lat = req.headers["x-vercel-ip-latitude"];
-  const lon = req.headers["x-vercel-ip-longitude"];
+  const lat = req.headers["x-vercel-ip-latitude"] as string;
+  const lon = req.headers["x-vercel-ip-longitude"] as string;
 
   if (!lat || !lon) {
     return res.status(404).json({
@@ -301,31 +379,80 @@ app.get("/api/weather/ip", async (req, res) => {
     const revData = await revRes.json();
     const addr = revData.address || {};
 
-    const village = addr.village || addr.suburb || addr.neighbourhood || addr.hamlet;
+    const village  = addr.village || addr.suburb || addr.neighbourhood || addr.hamlet;
     const district = addr.city_district || addr.district || addr.suburb;
-    const city = addr.city || addr.town || addr.municipality || addr.county;
-    const state = addr.state;
+    const city     = addr.city || addr.town || addr.municipality || addr.county;
+    const state    = addr.state;
 
     const region = resolveRegion(village, district, city, state);
+
+    // ── No region → de4a fallback ─────────────────────────────────────────────
     if (!region) {
-      return res.status(404).json({ error: "IP location region not found in BMKG database", address: addr });
+      console.warn("[CuacaKita] IP region not found, using de4a fallback");
+      try {
+        const fbRaw = await fetchDe4a(lat, lon);
+        const weather = normalizeDe4aToWeather(fbRaw);
+        const loc = fbRaw.data?.[0]?.location || {};
+        return res.json({
+          source: "de4a",
+          region: { province: loc.province, city: loc.city, district: loc.subdistrict, village: loc.village },
+          address: addr,
+          weather,
+          sourceType: "vercel-ip-headers",
+        });
+      } catch (fbErr: any) {
+        return res.status(404).json({ error: "IP region not found & fallback failed", detail: fbErr.message, address: addr });
+      }
     }
 
-    const adm4 = String(region.code);
+    const adm4      = String(region.code);
     const cleanCode = adm4.replace(/\./g, "");
 
     let weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(adm4)}`);
     if (!weatherRes.ok) {
       weatherRes = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(cleanCode)}`);
     }
-    if (!weatherRes.ok) {
-      return res.status(404).json({ error: "Weather data not found for IP region", region });
+
+    if (weatherRes.ok) {
+      const weatherData = await weatherRes.json();
+      if (weatherData?.data?.length > 0) {
+        return res.json({
+          source: "bmkg",
+          region,
+          address: addr,
+          weather: weatherData,
+          sourceType: "vercel-ip-headers",
+        });
+      }
     }
 
-    const weatherData = await weatherRes.json();
-    res.json({ region, address: addr, weather: weatherData, source: "vercel-ip-headers" });
+    // ── BMKG empty → de4a ─────────────────────────────────────────────────────
+    console.warn("[CuacaKita] BMKG empty for IP region, using de4a fallback");
+    try {
+      const fbRaw = await fetchDe4a(lat, lon);
+      const weather = normalizeDe4aToWeather(fbRaw, region);
+      return res.json({ source: "de4a", region, address: addr, weather, sourceType: "vercel-ip-headers" });
+    } catch (fbErr: any) {
+      return res.status(503).json({ error: "BMKG & fallback both failed", detail: fbErr.message });
+    }
+
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error("[CuacaKita] IP weather unexpected error:", error.message);
+    try {
+      const fbRaw = await fetchDe4a(lat, lon);
+      const weather = normalizeDe4aToWeather(fbRaw);
+      const loc = fbRaw.data?.[0]?.location || {};
+      return res.json({
+        source: "de4a",
+        region: { province: loc.province, city: loc.city, district: loc.subdistrict, village: loc.village },
+        address: {},
+        weather,
+        sourceType: "vercel-ip-headers",
+        fallbackReason: error.message,
+      });
+    } catch (fbErr: any) {
+      return res.status(500).json({ error: error.message, fallbackError: fbErr.message });
+    }
   }
 });
 
