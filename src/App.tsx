@@ -58,6 +58,21 @@ function wxInfo(code: number, desc: string) {
 
 const warr = (d: string) => WARR[(d || '').toUpperCase()] || d || '–';
 
+// ── Helper: build location label from region or weather data ──────────────────
+function buildLocationLabel(region: any, weatherData: WeatherData | null): string {
+  if (region) {
+    const parts = [region.village || region.district || '', region.city || ''].filter(Boolean);
+    return parts.join(', ').replace(/^,\s*/, '').replace(/,\s*$/, '');
+  }
+  if (weatherData) {
+    const lokasi = weatherData.data?.[0]?.lokasi;
+    if (lokasi) {
+      return [lokasi.kecamatan, lokasi.kotkab].filter(Boolean).join(', ');
+    }
+  }
+  return 'Lokasi tidak diketahui';
+}
+
 interface Forecast {
   local_datetime: string;
   utc_datetime: string;
@@ -84,6 +99,21 @@ interface WeatherData {
   }>;
 }
 
+// ── API response type from backend ──
+interface ForecastApiResponse {
+  source: 'bmkg' | 'de4a';
+  region: {
+    province?: string;
+    city?: string;
+    district?: string;
+    village?: string;
+    code?: string;
+  };
+  address: any;
+  weather: WeatherData;
+  fallbackReason?: string;
+}
+
 export default function App() {
   const [screen, setScreen] = useState<'loading' | 'error' | 'weather' | 'pick-region'>('loading');
   const [loadTitle, setLoadTitle] = useState('Mendeteksi lokasi...');
@@ -91,6 +121,7 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState('');
   const [weatherData, setWeatherData] = useState<WeatherData | null>(null);
   const [locationLabel, setLocationLabel] = useState('');
+  const [dataSource, setDataSource] = useState<'bmkg' | 'de4a' | null>(null);
   const [theme, setTheme] = useState('theme-sunny');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -116,24 +147,20 @@ export default function App() {
     if (!adm4 || typeof adm4 !== 'string') return null;
     const cleanCode = adm4.replace(/\./g, '');
     try {
-      // Try with dots first
       let r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(adm4)}`);
       if (r.ok) {
         const d = await r.json();
         if (d && d.data && d.data.length > 0 && d.data[0].cuaca && d.data[0].cuaca.length > 0) return d;
       }
-      
-      // Try without dots
       r = await fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${encodeURIComponent(cleanCode)}`);
       if (r.ok) {
         const d = await r.json();
         if (d && d.data && d.data.length > 0 && d.data[0].cuaca && d.data[0].cuaca.length > 0) return d;
       }
-      
       return null;
-    } catch (e) { 
+    } catch (e) {
       console.error("Probe BMKG error:", e);
-      return null; 
+      return null;
     }
   };
 
@@ -190,9 +217,8 @@ export default function App() {
     setLoadTitle('Mendeteksi lokasi...');
     setLoadStep('Meminta izin GPS...');
     setIsRefreshing(true);
-    
+
     try {
-      // Check database status
       const dbStatus = await fetch(`/api/db-status`).then(r => r.json()).catch((e) => {
         console.warn("DB Status check failed:", e);
         return { count: 0 };
@@ -202,15 +228,13 @@ export default function App() {
         await new Promise(r => setTimeout(r, 3000));
       }
 
-      // Try GPS first
       let lat: number | null = null;
       let lon: number | null = null;
 
       try {
         const pos = await new Promise<GeolocationPosition>((ok, fail) => {
           if (!navigator.geolocation) return fail(new Error('GPS tidak didukung'));
-          // Safari fix: Simple options
-          navigator.geolocation.getCurrentPosition(ok, fail, { 
+          navigator.geolocation.getCurrentPosition(ok, fail, {
             enableHighAccuracy: false,
             timeout: 10000,
             maximumAge: 0
@@ -221,36 +245,41 @@ export default function App() {
       } catch (gpsErr: any) {
         console.warn('GPS failed, trying IP fallback...', gpsErr);
         setLoadStep('GPS gagal, mencoba deteksi IP...');
-        
-        // Try IP-based detection from backend
+
         const ipRes = await fetch(`/api/weather/ip`);
         if (ipRes.ok) {
-          const ipData = await ipRes.json();
-          handleWeatherData(ipData.weather, `${ipData.region.village || ipData.region.district}, ${ipData.region.city}`);
-          return; // Success via IP
+          const ipData: ForecastApiResponse = await ipRes.json();
+          const label = buildLocationLabel(ipData.region, ipData.weather);
+          handleWeatherData(ipData.weather, label, ipData.source);
+          return;
         }
-        
-        // If IP also fails, throw the original GPS error to show in UI
+
         throw gpsErr;
       }
 
       if (lat !== null && lon !== null && !isNaN(lat) && !isNaN(lon)) {
         setLoadTitle('Menentukan wilayah...');
         setLoadStep(`${lat.toFixed(4)}, ${lon.toFixed(4)}`);
-        
-        // Use backend forecast endpoint (more robust)
-        // Use URL object to ensure valid URL construction
+
         const url = new URL('/api/weather/forecast', window.location.origin);
         url.searchParams.append('lat', String(lat));
         url.searchParams.append('long', String(lon));
-        
+
         const r = await fetch(url.toString());
         if (!r.ok) {
           const errData = await r.json();
           throw new Error(errData.error || 'Gagal mengambil data cuaca');
         }
-        const data = await r.json();
-        handleWeatherData(data.weather, `${data.region.village || data.region.district}, ${data.region.city}`);
+
+        const data: ForecastApiResponse = await r.json();
+
+        // Warn in console if fallback was used
+        if (data.source === 'de4a') {
+          console.info('[CuacaKita] Using de4a fallback data', data.fallbackReason || '');
+        }
+
+        const label = buildLocationLabel(data.region, data.weather);
+        handleWeatherData(data.weather, label, data.source);
       } else {
         throw new Error('Koordinat tidak valid');
       }
@@ -265,29 +294,30 @@ export default function App() {
         else if (err.code === 3) msg = 'Waktu GPS habis. Coba lagi.';
       }
       setErrorMsg(msg);
-      // If location fails, go to pick-region instead of error screen
       fetchProvinces();
     } finally {
       setIsRefreshing(false);
     }
   }, []);
 
-  const handleWeatherData = (wd: WeatherData, loc: string) => {
+  const handleWeatherData = (wd: WeatherData, loc: string, source?: 'bmkg' | 'de4a') => {
     setWeatherData(wd);
+    setDataSource(source || null);
+
     const bl = (wd.data?.[0]?.lokasi || {}) as { kecamatan?: string; kotkab?: string; provinsi?: string };
-    const kec = bl.kecamatan || '';
+    const kec  = bl.kecamatan || '';
     const kota = bl.kotkab || '';
     const prov = bl.provinsi || '';
     const label = [kec, kota || prov].filter(Boolean).join(', ') || loc;
     setLocationLabel(label);
-    
+
     const { all, ni } = parseForecasts(wd);
     if (all.length > 0) {
       const cur = all[ni];
       const info = wxInfo(cur.weather, cur.weather_desc);
       setTheme(info.t);
     }
-    
+
     setScreen('weather');
     showToast(`📍 ${label}`);
   };
@@ -314,30 +344,26 @@ export default function App() {
     setIsSearching(true);
     setSearchResults([]);
     try {
-      // 1. Search Nominatim for general places
-      // Note: User-Agent is a forbidden header in browsers, removed it to avoid Safari errors
       const url = new URL('https://nominatim.openstreetmap.org/search');
       url.searchParams.append('q', searchQuery + ', Indonesia');
       url.searchParams.append('format', 'json');
       url.searchParams.append('addressdetails', '1');
       url.searchParams.append('limit', '5');
       url.searchParams.append('accept-language', 'id');
-      
+
       const r = await fetch(url.toString());
       const nomRes = await r.json();
-      
-      // 2. Search our backend for specific BMKG regions
+
       const brUrl = new URL('/api/search-region', window.location.origin);
       brUrl.searchParams.append('q', searchQuery);
       const br = await fetch(brUrl.toString());
       const backRes = await br.json();
-      
-      // Combine results, marking backend ones
+
       const combined = [
         ...backRes.map((b: any) => ({ ...b, isBackend: true, display_name: `${b.name}, ${b.district || b.city}, ${b.province}` })),
         ...nomRes
       ];
-      
+
       setSearchResults(combined);
     } catch (e: any) {
       showToast(e.message);
@@ -350,7 +376,6 @@ export default function App() {
     try {
       return date.toLocaleDateString('id-ID', options);
     } catch (e) {
-      console.warn('id-ID locale not supported, falling back to default');
       return date.toLocaleDateString(undefined, options);
     }
   };
@@ -359,7 +384,6 @@ export default function App() {
     try {
       return date.toLocaleTimeString('id-ID', options);
     } catch (e) {
-      console.warn('id-ID locale not supported, falling back to default');
       return date.toLocaleTimeString(undefined, options);
     }
   };
@@ -374,7 +398,7 @@ export default function App() {
       if (place.isBackend) {
         const wd = await probeBMKG(place.code);
         if (!wd) throw new Error('Data cuaca tidak tersedia untuk wilayah ini');
-        handleWeatherData(wd, place.name);
+        handleWeatherData(wd, place.name, 'bmkg');
       } else {
         const url = new URL('/api/weather/forecast', window.location.origin);
         url.searchParams.append('lat', String(place.lat));
@@ -384,8 +408,9 @@ export default function App() {
           const errData = await r.json();
           throw new Error(errData.error || 'Gagal mengambil data cuaca');
         }
-        const data = await r.json();
-        handleWeatherData(data.weather, `${data.region.village || data.region.district}, ${data.region.city}`);
+        const data: ForecastApiResponse = await r.json();
+        const label = buildLocationLabel(data.region, data.weather);
+        handleWeatherData(data.weather, label, data.source);
       }
     } catch (e: any) {
       setErrorMsg(e.message);
@@ -401,12 +426,10 @@ export default function App() {
 
   if (screen === 'loading') {
     return (
-      <div 
-        id="app" 
+      <div
+        id="app"
         className={`${theme} min-h-dvh flex flex-col transition-all duration-1000`}
-        style={{
-          background: `linear-gradient(175deg, var(--g1, #0c4a6e) 0%, var(--g2, #0ea5e9) 45%, #07111f 100%)`
-        }}
+        style={{ background: `linear-gradient(175deg, var(--g1, #0c4a6e) 0%, var(--g2, #0ea5e9) 45%, #07111f 100%)` }}
       >
         <div className="flex-1 flex flex-col items-center justify-center gap-7 px-8 py-12 text-center">
           <div className="relative w-24 h-24">
@@ -426,26 +449,19 @@ export default function App() {
 
   if (screen === 'pick-region') {
     return (
-      <div 
-        id="app" 
+      <div
+        id="app"
         className={`${theme} min-h-dvh flex flex-col transition-all duration-1000`}
-        style={{
-          background: `linear-gradient(175deg, var(--g1, #0c4a6e) 0%, var(--g2, #0ea5e9) 45%, #07111f 100%)`
-        }}
+        style={{ background: `linear-gradient(175deg, var(--g1, #0c4a6e) 0%, var(--g2, #0ea5e9) 45%, #07111f 100%)` }}
       >
         <div className="px-5 pt-12 pb-6 flex items-center justify-between fi">
           <div className="flex items-center gap-3">
             {selectedProvince && (
-              <button 
+              <button
                 className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center"
                 onClick={() => {
-                  if (selectedCity) {
-                    setSelectedCity(null);
-                    setDistricts([]);
-                  } else {
-                    setSelectedProvince(null);
-                    setCities([]);
-                  }
+                  if (selectedCity) { setSelectedCity(null); setDistricts([]); }
+                  else { setSelectedProvince(null); setCities([]); }
                 }}
               >
                 <ArrowLeft size={18} />
@@ -465,10 +481,10 @@ export default function App() {
 
         <div className="flex-1 overflow-y-auto no-scrollbar px-5 pb-10 flex flex-col gap-2 fi2">
           {pickerLoading && <div className="text-center py-10 text-white/40 animate-pulse">Memuat data...</div>}
-          
+
           {!pickerLoading && !selectedProvince && provinces.map((p, i) => (
-            <div 
-              key={i} 
+            <div
+              key={i}
               className="p-4 bg-white/5 border border-white/8 rounded-2xl cursor-pointer flex items-center justify-between active:bg-white/10 transition-colors"
               onClick={() => fetchCities(p.name)}
             >
@@ -478,8 +494,8 @@ export default function App() {
           ))}
 
           {!pickerLoading && selectedProvince && !selectedCity && cities.map((c, i) => (
-            <div 
-              key={i} 
+            <div
+              key={i}
               className="p-4 bg-white/5 border border-white/8 rounded-2xl cursor-pointer flex items-center justify-between active:bg-white/10 transition-colors"
               onClick={() => fetchDistricts(c.name)}
             >
@@ -492,8 +508,8 @@ export default function App() {
           ))}
 
           {!pickerLoading && selectedCity && districts.map((d, i) => (
-            <div 
-              key={i} 
+            <div
+              key={i}
               className="p-4 bg-white/5 border border-white/8 rounded-2xl cursor-pointer flex items-center justify-between active:bg-white/10 transition-colors"
               onClick={() => selectPlace({ ...d, isBackend: true, province: selectedProvince, city: selectedCity })}
             >
@@ -514,25 +530,26 @@ export default function App() {
 
   if (screen === 'error') {
     return (
-      <div 
-        id="app" 
+      <div
+        id="app"
         className={`${theme} min-h-dvh flex flex-col transition-all duration-1000`}
-        style={{
-          background: `linear-gradient(175deg, var(--g1, #0c4a6e) 0%, var(--g2, #0ea5e9) 45%, #07111f 100%)`
-        }}
+        style={{ background: `linear-gradient(175deg, var(--g1, #0c4a6e) 0%, var(--g2, #0ea5e9) 45%, #07111f 100%)` }}
       >
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-10 text-center gap-3.5">
           <div className="text-5xl">📡</div>
           <div className="text-xl font-semibold">Lokasi Tidak Ditemukan</div>
           <div className="text-sm text-white/55 leading-relaxed max-w-[280px] whitespace-pre-line">{errorMsg}</div>
-          <button className="px-8 py-3 bg-sky-500/90 border-none rounded-full text-white text-sm font-semibold cursor-pointer mt-1 shadow-xl shadow-sky-500/35" onClick={startApp}>
+          <button
+            className="px-8 py-3 bg-sky-500/90 border-none rounded-full text-white text-sm font-semibold cursor-pointer mt-1 shadow-xl shadow-sky-500/35"
+            onClick={startApp}
+          >
             🔄 &nbsp;Coba Lagi
           </button>
           <div className="text-xs text-white/30 mt-1">— atau cari manual —</div>
           <div className="w-full flex gap-2 mt-1">
-            <input 
-              className="flex-1 px-4 py-3 bg-white/7 border border-white/12 rounded-2xl text-white text-sm outline-none placeholder:text-white/30" 
-              placeholder="Nama kecamatan / kota..." 
+            <input
+              className="flex-1 px-4 py-3 bg-white/7 border border-white/12 rounded-2xl text-white text-sm outline-none placeholder:text-white/30"
+              placeholder="Nama kecamatan / kota..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && doSearch()}
@@ -544,8 +561,8 @@ export default function App() {
           <div className="w-full flex flex-col gap-1.5 max-h-[220px] overflow-y-auto no-scrollbar">
             {isSearching && <div className="text-xs text-white/40 p-2">Mencari...</div>}
             {searchResults.map((res: any, idx) => (
-              <div 
-                key={idx} 
+              <div
+                key={idx}
                 className="p-3 bg-white/7 border border-white/8 rounded-xl cursor-pointer flex items-center gap-3 active:bg-white/10 transition-colors text-left"
                 onClick={() => selectPlace(res)}
               >
@@ -566,7 +583,7 @@ export default function App() {
 
   if (screen === 'weather' && weatherData) {
     const { all, ni } = parseForecasts(weatherData);
-    
+
     if (all.length === 0) {
       return (
         <div id="app" className={`${theme} min-h-dvh flex flex-col items-center justify-center p-10 text-center bg-[#07111f]`}>
@@ -582,7 +599,6 @@ export default function App() {
     const updDate = new Date(cur.local_datetime || cur.utc_datetime);
     const analysisDate = cur.analysis_date ? new Date(cur.analysis_date) : null;
 
-    // Group by day for daily list
     const byDay: Record<string, Forecast[]> = {};
     for (const f of all) {
       const k = (f.local_datetime || f.utc_datetime || '').slice(0, 10);
@@ -591,29 +607,44 @@ export default function App() {
     }
     const dkeys = Object.keys(byDay).slice(0, 4);
 
+    // Source badge label
+    const sourceBadge = dataSource === 'de4a' ? '🔄 Sumber Alternatif' : 'BMKG';
+    const sourceTitle = dataSource === 'de4a'
+      ? 'Data cuaca dari sumber alternatif (de4a.space) · BMKG tidak tersedia saat ini'
+      : 'Data cuaca oleh BMKG · Badan Meteorologi, Klimatologi, dan Geofisika';
+
     return (
-      <div 
-        id="app" 
+      <div
+        id="app"
         className={`${theme} min-h-dvh flex flex-col transition-all duration-1000`}
-        style={{
-          background: `linear-gradient(175deg, var(--g1, #0c4a6e) 0%, var(--g2, #0ea5e9) 45%, #07111f 100%)`
-        }}
+        style={{ background: `linear-gradient(175deg, var(--g1, #0c4a6e) 0%, var(--g2, #0ea5e9) 45%, #07111f 100%)` }}
       >
+        {/* Header */}
         <div className="px-5 pt-12 pb-4 flex items-start justify-between fi">
-          <div className="flex items-center gap-2 bg-white/10 backdrop-blur-xl border border-white/10 rounded-full px-4 py-2 cursor-pointer max-w-[65vw]" onClick={() => setIsSearchOpen(true)}>
+          <div
+            className="flex items-center gap-2 bg-white/10 backdrop-blur-xl border border-white/10 rounded-full px-4 py-2 cursor-pointer max-w-[65vw]"
+            onClick={() => setIsSearchOpen(true)}
+          >
             <MapPin size={14} className="text-white/80" />
             <span className="text-xs font-medium whitespace-nowrap overflow-hidden text-ellipsis">{locationLabel}</span>
           </div>
           <div className="flex gap-2">
-            <button className="w-10 h-10 rounded-full bg-white/10 border border-white/10 flex items-center justify-center cursor-pointer text-white" onClick={() => setIsSearchOpen(true)}>
+            <button
+              className="w-10 h-10 rounded-full bg-white/10 border border-white/10 flex items-center justify-center cursor-pointer text-white"
+              onClick={() => setIsSearchOpen(true)}
+            >
               <Search size={18} />
             </button>
-            <button className={`w-10 h-10 rounded-full bg-white/10 border border-white/10 flex items-center justify-center cursor-pointer text-white ${isRefreshing ? 'animate-spin-slow' : ''}`} onClick={startApp}>
+            <button
+              className={`w-10 h-10 rounded-full bg-white/10 border border-white/10 flex items-center justify-center cursor-pointer text-white ${isRefreshing ? 'animate-spin-slow' : ''}`}
+              onClick={startApp}
+            >
               <RefreshCw size={18} />
             </button>
           </div>
         </div>
 
+        {/* Main weather */}
         <div className="px-5 pt-1 pb-7 fi">
           <div className="text-8xl leading-none drop-shadow-2xl animate-float">{info.e}</div>
           <div className="text-8xl font-bold leading-none tracking-tighter mt-1">
@@ -626,6 +657,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Stats */}
         <div className="grid grid-cols-3 gap-2 px-4.5 pb-4.5 fi2">
           <div className="bg-white/7 border border-white/7 rounded-2xl p-3.5 text-center">
             <Droplets size={18} className="mx-auto" />
@@ -644,6 +676,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Hourly */}
         <div className="px-4.5 pb-4.5 fi3">
           <div className="text-[10px] font-semibold text-white/35 uppercase tracking-[1.8px] mb-3">Prakiraan Per 3 Jam</div>
           <div className="flex gap-2 overflow-x-auto no-scrollbar pb-0.5">
@@ -661,6 +694,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Daily */}
         <div className="px-4.5 pb-4.5 fi4">
           <div className="text-[10px] font-semibold text-white/35 uppercase tracking-[1.8px] mb-3">3 Hari ke Depan</div>
           <div className="bg-white/5 border border-white/6 rounded-2xl overflow-hidden">
@@ -686,6 +720,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Detail cards */}
         <div className="px-4.5 pb-4.5 fi5">
           <div className="text-[10px] font-semibold text-white/35 uppercase tracking-[1.8px] mb-3">Detail</div>
           <div className="grid grid-cols-2 gap-2">
@@ -722,20 +757,28 @@ export default function App() {
           </div>
         </div>
 
+        {/* Footer — dynamic source label */}
         <div className="px-5 pt-1.5 pb-7 text-center text-[10.5px] text-white/20">
-          Data cuaca oleh <b className="text-white/35">BMKG</b> · Badan Meteorologi, Klimatologi, dan Geofisika
+          {sourceTitle}
           <div className="mt-2 flex flex-col gap-1">
             <a href="/api/weather?adm4=31.71.01.1001" target="_blank" className="text-sky-400/40 hover:text-sky-400/60 transition-colors">API via Kode Wilayah</a>
             <a href="/api/weather/forecast?lat=-6.1754&long=106.8272" target="_blank" className="text-sky-400/40 hover:text-sky-400/60 transition-colors">API via Koordinat (Lat/Long)</a>
           </div>
+          {dataSource === 'de4a' && (
+            <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400/60 text-[9px]">
+              ⚠️ BMKG tidak tersedia · menggunakan sumber alternatif
+            </div>
+          )}
         </div>
 
+        {/* Toast */}
         {toastMsg && (
           <div className="fixed bottom-9 left-1/2 -translate-x-1/2 bg-[#0a1428]/92 border border-white/10 backdrop-blur-2xl rounded-full px-5 py-2 text-[12.5px] text-white/80 z-[999] pointer-events-none whitespace-nowrap animate-in fade-in slide-in-from-bottom-2 duration-300">
             {toastMsg}
           </div>
         )}
 
+        {/* Search overlay */}
         {isSearchOpen && (
           <div className="fixed inset-0 bg-[#07111f]/95 backdrop-blur-xl z-[1000] flex flex-col p-6 animate-in fade-in duration-300">
             <div className="flex items-center justify-between mb-6">
@@ -743,10 +786,10 @@ export default function App() {
               <button className="text-white/40 text-sm" onClick={() => setIsSearchOpen(false)}>Tutup</button>
             </div>
             <div className="flex gap-2 mb-4">
-              <input 
+              <input
                 autoFocus
-                className="flex-1 px-4 py-3 bg-white/7 border border-white/12 rounded-2xl text-white text-sm outline-none placeholder:text-white/30" 
-                placeholder="Nama kecamatan / kota..." 
+                className="flex-1 px-4 py-3 bg-white/7 border border-white/12 rounded-2xl text-white text-sm outline-none placeholder:text-white/30"
+                placeholder="Nama kecamatan / kota..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && doSearch()}
@@ -761,13 +804,10 @@ export default function App() {
                 <div className="text-center py-10 text-white/30 text-sm">Tidak ada hasil.</div>
               )}
               {searchResults.map((res: any, idx) => (
-                <div 
-                  key={idx} 
+                <div
+                  key={idx}
                   className="p-4 bg-white/5 border border-white/8 rounded-2xl cursor-pointer flex items-center gap-4 active:bg-white/10 transition-colors"
-                  onClick={() => {
-                    selectPlace(res);
-                    setIsSearchOpen(false);
-                  }}
+                  onClick={() => { selectPlace(res); setIsSearchOpen(false); }}
                 >
                   <div className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center text-sm shrink-0">
                     {res.isBackend ? '📍' : '🗺️'}
